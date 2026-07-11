@@ -40,12 +40,14 @@ class Player:
 
 
 class Match:
-    def __init__(self, match_id, gamemode, time_created, player_ids, status="ongoing",
+    def __init__(self, match_id, gamemode, time_created,team_a_ids,team_b_ids ,player_ids, status="ongoing",
                  score_a=None, score_b=None, time_completed=None):
         self.match_id = match_id
         self.gamemode = gamemode
         self.time_created = datetime.datetime.now()
         self.player_ids = player_ids
+        self.team_a_ids = team_a_ids
+        self.team_b_ids = team_b_ids
         self.status = status
         self.score_a = score_a
         self.score_b = score_b
@@ -66,10 +68,124 @@ class Match:
         conn.commit()
         conn.close()
 
+class WinnerVoteView(discord.ui.View):
+    def __init__(self, match_id, req_votes, player_ids, messages=None ):
+        super().__init__(timeout=120)
+        self.match_id = match_id
+        self.req_votes = req_votes
+        self.messages = messages or []
+        self.player_ids = player_ids
+
+    @discord.ui.button(label="Team A Won", style=discord.ButtonStyle.blurple)
+    async def vote_a(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.record_vote(interaction, 1)
+
+    @discord.ui.button(label="Team B Won", style=discord.ButtonStyle.red)
+    async def vote_b(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.record_vote(interaction, 2)
+
+    async def record_vote(self, interaction: discord.Interaction, choice: int):
+        user_id = interaction.user.id
+        votes = queue_votes.setdefault(self.match_id, {})
+
+        if votes.get(user_id) == choice:
+            del votes[user_id]
+        else:
+            votes[user_id] = choice
+
+        await interaction.response.defer()
+        await self.broadcast_update()
+
+    def get_counts(self):
+        votes = queue_votes.get(self.match_id, {})
+        team_a = sum(1 for v in votes.values() if v == 1)
+        team_b = sum(1 for v in votes.values() if v == 2)
+        return team_a, team_b
+
+    def get_winner(self):
+        team_a, team_b = self.get_counts()
+        if team_a > team_b:
+            return 1
+        elif team_b > team_a:
+            return 2
+        return None
+
+    def build_embed(self, status=None):
+        team_a, team_b = self.get_counts()
+        embed = discord.Embed(title=f"Match #{self.match_id} — Who Won?", color=discord.Color.blurple())
+        embed.add_field(name="Team A players")
+        embed.add_field(name="Team A", value=str(team_a), inline=True)
+        embed.add_field(name="Team B", value=str(team_b), inline=True)
+
+        if status == "resolved":
+            winner = self.get_winner()
+            embed.description = f"**{'Team A' if winner == 1 else 'Team B'} wins!**"
+            embed.set_footer(text="Vote confirmed")
+        elif status == "timeout_decided":
+            winner = self.get_winner()
+            embed.description = f"**{'Team A' if winner == 1 else 'Team B'} wins** (majority vote, time expired)"
+            embed.set_footer(text="Vote closed")
+        elif status == "timeout_tied":
+            embed.description = "**Winner not decided — match doesn't count.**"
+            embed.set_footer(text="Vote tied at timeout")
+        else:
+            embed.set_footer(text=f"{self.req_votes} votes needed to confirm")
+
+        return embed
+
+    async def broadcast_update(self):
+        embed = self.build_embed()
+        for msg in self.messages:
+            try:
+                await msg.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                continue
+
+        team_a, team_b = self.get_counts()
+        if team_a >= self.req_votes or team_b >= self.req_votes:
+            await self.resolve()
+
+    async def resolve(self):
+        for item in self.children:
+            item.disabled = True
+
+        embed = self.build_embed(status="resolved")
+        for msg in self.messages:
+            try:
+                await msg.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                continue
+
+        self.stop()
+        # TODO: write self.get_winner() to DB here
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+        winner = self.get_winner()
+        status = "timeout_tied" if winner is None else "timeout_decided"
+        embed = self.build_embed(status=status)
+
+        for msg in self.messages:
+            try:
+                await msg.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                continue
+
+class TeamSelectView(discord.ui.View):
+    def __init__(self, ):
+
+    super().__init__(timeout=120)
+
 target_names = {
     "Ranked Duel 1v1": "ones",
     "Ranked Doubles 2v2": "twos",
     "Ranked Standard 3v3": "threes",
+}
+
+queue_votes = {
+
 }
 
 # <editor-fold desc="Functions">
@@ -135,6 +251,8 @@ def init_db():
             match_id TEXT PRIMARY KEY,
             gamemode TEXT NOT NULL,
             player_ids TEXT NOT NULL,
+            team_a_ids TEXT NOT NULL,
+            team_b_ids TEXT NOT NULL,
             status TEXT NOT NULL,
             score_a INTEGER,
             score_b INTEGER,
@@ -226,9 +344,9 @@ async def start_match(players, region, gamemode, channel):
     status = "ongoing"
     match = Match(match_id=id, gamemode=gamemode, time_created=time, player_ids=player_ids, status=status)
     save_match(match)
-    await channel.send(f"Match found! {gamemode} V {gamemode} in {region}\n"
-                       f"ID: {id}\n"
-                       f"{mentions}")
+    # TODO: MAKE THIS GO INTO A DM, MAKE THE CLASS FOR THE TEAM VOTING AND SET IT UP WITHIN THIS FUNCTION TO WORK
+    #todo: THEN CHANGE DB TO IT HAS WHICH TEAM WHICH IDS ARE IN, THEN ADD WHICH PLAYERS ON WHAT TEAM IN VOTING
+    #TODO: THEN CHANGE Q TO FILTER SO ONLY ALLOWS CERTAIN MMR GAPS, THEN MAKE ELO SYSTEM
 
 def generate_id():
     x = random.randint(1,1000)
@@ -257,7 +375,19 @@ def is_player_in_match(discord_id):
             return True
     return False
 
+async def send_winner_vote_dm(match_id, player_ids, required_votes):
+    view = WinnerVoteView(match_id, required_votes, player_ids = player_ids)
 
+    for discord_id in player_ids:
+        try:
+            user = await bot.fetch_user(int(discord_id))
+            embed = view.build_embed()
+            msg = await user.send(embed=embed, view=view)
+            view.messages.append(msg)
+        except discord.Forbidden:
+            print(f"cant dm user: {discord_id}, dms may be disabled")
+        except discord.NotFound:
+            print(f"Couldnt find user: {discord_id}")
 
 # </editor-fold>
 
@@ -445,30 +575,47 @@ async def submit(interaction, match_id: str):
             UPDATE matches
             SET status = 'submitting'
             WHERE match_id = ? AND status = 'ongoing'
-        """, (match_id,))
+        """, (str(match_id),))
     claimed = cur.rowcount > 0
+    print(claimed)
     conn.commit()
-    conn.close()
 
-    if not claimed:
+
+    '''if not claimed:
         conn.close()
         await interaction.followup.send(
             "This match is already being submitted or isn't active.", ephemeral=True
         )
-        return
+        return'''
 
     cur.execute("SELECT player_ids FROM matches WHERE match_id = ?", (match_id,))
-    ids_str = cur.fetchone().replace(" ", )
-    ids = ids_str.strip(" ")
-    for id in ids:
+    ids_str = cur.fetchone()
+    conn.close()
+    player_ids = ids_str[0].split(" ")
+
+    required_votes = 0
+    if len(player_ids) == 6:
+        required_votes = 4
+    elif len(player_ids) == 4:
+        required_votes = 3
+    elif len(player_ids) == 2:
+        required_votes = 2
+    else:
+        await interaction.followup.send("Error, not enough ids in the db")
+        return
+
+
+    for discord_id in player_ids:
         try:
-            user = await bot.fetch_user(int(id))
+            user = await bot.fetch_user(int(discord_id))
             await user.send(f"Match {match_id}: Please confirm or dispute the score")
         except discord.Forbidden:
-            print(f"cant dm user: {id}")
+            print(f"cant dm user: {discord_id}")
         except discord.NotFound:
-            print(f"cannot find user: {id}")
-    conn.close()
+            print(f"cannot find user: {discord_id}")
+
+
+    await send_winner_vote_dm(match_id, player_ids = player_ids, required_votes=required_votes)
     await interaction.followup.send("Sending confirmation DMs...", ephemeral=True)
     return
 
