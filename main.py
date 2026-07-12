@@ -79,10 +79,12 @@ class WinnerVoteView(discord.ui.View):
     @discord.ui.button(label="Team A Won", style=discord.ButtonStyle.blurple)
     async def vote_a(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.record_vote(interaction, 1)
+    #this the 1st button
 
     @discord.ui.button(label="Team B Won", style=discord.ButtonStyle.red)
     async def vote_b(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.record_vote(interaction, 2)
+    #this the 2nd button
 
     async def record_vote(self, interaction: discord.Interaction, choice: int):
         user_id = interaction.user.id
@@ -95,12 +97,14 @@ class WinnerVoteView(discord.ui.View):
 
         await interaction.response.defer()
         await self.broadcast_update()
+    #this puts the choice in a list inside a dict, then updates all messages with the new current votes
 
     def get_counts(self):
         votes = queue_votes.get(self.match_id, {})
         team_a = sum(1 for v in votes.values() if v == 1)
         team_b = sum(1 for v in votes.values() if v == 2)
         return team_a, team_b
+    #this sees the votes and checks to see if its at the needed amount to complete and assign winner, is called a lot
 
     def get_winner(self):
         team_a, team_b = self.get_counts()
@@ -109,6 +113,7 @@ class WinnerVoteView(discord.ui.View):
         elif team_b > team_a:
             return 2
         return None
+    #this just returns which team won
 
     def build_embed(self, status=None):
         team_a, team_b = self.get_counts()
@@ -132,6 +137,8 @@ class WinnerVoteView(discord.ui.View):
             embed.set_footer(text=f"{self.req_votes} votes needed to confirm")
 
         return embed
+    #this is the embed which does most of the graphics, allows everyone to see updated votes instantly, have a title and
+    #have a description and other things with details to make it look more complete
 
     async def broadcast_update(self):
         embed = self.build_embed()
@@ -144,6 +151,8 @@ class WinnerVoteView(discord.ui.View):
         team_a, team_b = self.get_counts()
         if team_a >= self.req_votes or team_b >= self.req_votes:
             await self.resolve()
+    #this changed the embed by going into every message within messages list and then changes them to what it should be
+    #it is called when button is pressed so it also calls get counts and resolve if get counts has a winner
 
     async def resolve(self):
         for item in self.children:
@@ -157,6 +166,8 @@ class WinnerVoteView(discord.ui.View):
                 continue
 
         self.stop()
+        #this changed the embed to say who the winner is and set the status to resolves and make it so you cannot
+        #interact with the ui anymore
         # TODO: write self.get_winner() to DB here
 
     async def on_timeout(self):
@@ -172,11 +183,16 @@ class WinnerVoteView(discord.ui.View):
                 await msg.edit(embed=embed, view=self)
             except discord.HTTPException:
                 continue
+    #this is for when the timeout is reached, if this happens it picks who has the majority votes or just defers the game
 
 class TeamSelectView(discord.ui.View):
-    def __init__(self, ):
+    def __init__(self,player_ids, match_id, gamemode, region):
+        super().__init__(timeout=120)
+        self.player_ids = player_ids
+        self.match_id = match_id
+        self.gamemode = gamemode
+        self.region = region
 
-    super().__init__(timeout=120)
 
 target_names = {
     "Ranked Duel 1v1": "ones",
@@ -336,14 +352,11 @@ async def matchmaking_loop():
         await asyncio.sleep(3)
 
 async def start_match(players, region, gamemode, channel):
-    id = generate_id()
-    mentions = " ".join(f"<@{p.discord_id}>" for p in players)
-    player_ids = " ".join(str(p.discord_id) for p in players)
-    print(player_ids)
-    time = datetime.datetime.now().isoformat()
-    status = "ongoing"
-    match = Match(match_id=id, gamemode=gamemode, time_created=time, player_ids=player_ids, status=status)
-    save_match(match)
+    match_id = generate_id()
+    player_ids = [p.discord_id for p in players]
+    view = TeamSelectView(player_ids=player_ids, match_id=match_id, gamemode=gamemode, region=region)
+
+
     # TODO: MAKE THIS GO INTO A DM, MAKE THE CLASS FOR THE TEAM VOTING AND SET IT UP WITHIN THIS FUNCTION TO WORK
     #todo: THEN CHANGE DB TO IT HAS WHICH TEAM WHICH IDS ARE IN, THEN ADD WHICH PLAYERS ON WHAT TEAM IN VOTING
     #TODO: THEN CHANGE Q TO FILTER SO ONLY ALLOWS CERTAIN MMR GAPS, THEN MAKE ELO SYSTEM
