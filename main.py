@@ -1,8 +1,10 @@
 import datetime
 import random
 import string
+from pydoc import resolve
 
 import discord
+import discord.ui
 from discord import *
 from discord.ext import commands
 from discord import app_commands
@@ -118,7 +120,6 @@ class WinnerVoteView(discord.ui.View):
     def build_embed(self, status=None):
         team_a, team_b = self.get_counts()
         embed = discord.Embed(title=f"Match #{self.match_id} — Who Won?", color=discord.Color.blurple())
-        embed.add_field(name="Team A players")
         embed.add_field(name="Team A", value=str(team_a), inline=True)
         embed.add_field(name="Team B", value=str(team_b), inline=True)
 
@@ -186,12 +187,106 @@ class WinnerVoteView(discord.ui.View):
     #this is for when the timeout is reached, if this happens it picks who has the majority votes or just defers the game
 
 class TeamSelectView(discord.ui.View):
-    def __init__(self,player_ids, match_id, gamemode, region):
+    def __init__(self,player_ids, match_id, gamemode, region, messages=None):
         super().__init__(timeout=120)
         self.player_ids = player_ids
         self.match_id = match_id
         self.gamemode = gamemode
         self.region = region
+        self.messages = messages or []
+        self.player_selection_vote = {}
+        self.vote_counts = {1:0,2:0,3:0}
+        if gamemode == 1:
+            self.required_votes = 2
+        elif gamemode == 2:
+            self.required_votes = 3
+        elif gamemode == 3:
+            self.required_votes = 4
+
+    @discord.ui.button(label="Balanced", style=discord.ButtonStyle.blurple)
+    async def vote_balanced(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.record_vote(interaction, choice=1)
+
+    @discord.ui.button(label="Captains", style=discord.ButtonStyle.blurple)
+    async def vote_captains(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.record_vote(interaction, choice=2)
+
+    @discord.ui.button(label="Random", style=discord.ButtonStyle.blurple)
+    async def vote_random(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.record_vote(interaction, choice=3)
+
+    async def record_vote(self, interaction, choice):
+        user_id = interaction.user.id
+        current = self.player_selection_vote.get(user_id)
+
+        if current == choice:
+            del self.player_selection_vote[user_id]
+        else:
+            self.player_selection_vote[user_id] = choice
+            self.vote_counts[choice] += 1
+
+        await interaction.response.defer()
+
+
+    async def get_votes(self):
+        balanced_votes = self.vote_counts[1]
+        captain_votes = self.vote_counts[2]
+        random_votes = self.vote_counts[3]
+        return balanced_votes, captain_votes, random_votes
+
+    async def broadcast_update(self):
+        embed = self.build_embed()
+        for msg in self.messages:
+            try:
+                await msg.edit(embed=embed, view = self)
+            except discord.HTTPException:
+                continue
+
+        balanced_votes, captain_votes, random_votes = self.get_votes()
+        if balanced_votes >= self.required_votes or captain_votes >= self.required_votes or random_votes >= self.required_votes:
+           await self.resolve()
+
+    async def resolve(self):
+        for item in self.children:
+            item.disabled = True
+
+        embed = self.build_embed()
+        for msg in self.messages:
+            try:
+                await msg.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                continue
+        self.build_embed(status="resolved")
+
+        self.stop()
+
+
+    def build_embed(self, status = None):
+        balanced_votes, captain_votes, random_votes = self.get_votes()
+        embed = discord.Embed(title=f"{self.gamemode} — {self.region}", color=discord.Color.blurple())
+        embed.add_field(name="Balanced", value=str(balanced_votes), inline=True)
+        embed.add_field(name="Captains", value=str(captain_votes), inline=True)
+        embed.add_field(name="Random", value=str(random_votes), inline=True)
+
+        if status == "resolved":
+            winner = self.get_winner()
+            embed.description = f"**{'Team A' if winner == 1 else 'Team B'} wins!**"
+            embed.set_footer(text="Vote confirmed")
+        elif status == "timeout_decided":
+            winner = self.get_winner()
+            embed.description = f"**{'Team A' if winner == 1 else 'Team B'} wins** (majority vote, time expired)"
+            embed.set_footer(text="Vote closed")
+        elif status == "timeout_tied":
+            embed.description = "**Winner not decided — match doesn't count.**"
+            embed.set_footer(text="Vote tied at timeout")
+        else:
+            embed.set_footer(text=f"{self.req_votes} votes needed to confirm")
+
+
+        return embed
+
+
+
 
 
 target_names = {
@@ -355,6 +450,18 @@ async def start_match(players, region, gamemode, channel):
     match_id = generate_id()
     player_ids = [p.discord_id for p in players]
     view = TeamSelectView(player_ids=player_ids, match_id=match_id, gamemode=gamemode, region=region)
+
+    for discord_id in player_ids:
+        try:
+            user = await bot.fetch_user(int(discord_id))
+            embed = view.build_embed()
+            msg = await user.send(embed=embed, view=view)
+            view.messages.append(msg)
+        except discord.Forbidden:
+            print(f"User: {discord_id} might have dms off cannot find them")
+        except discord.NotFound:
+            print(f"Couldnt find user: {discord_id}")
+
 
 
     # TODO: MAKE THIS GO INTO A DM, MAKE THE CLASS FOR THE TEAM VOTING AND SET IT UP WITHIN THIS FUNCTION TO WORK
